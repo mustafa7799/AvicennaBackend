@@ -94,6 +94,7 @@ export function apiRequestLogger() {
       }
 
       const log = {
+        ip: req.headers['x-forwarded-for']?.split(',')[0] || req.socket.remoteAddress || req.ip,
         ts: new Date().toISOString(),
         method: req.method,
         path: req.originalUrl.replace(/^\/api/, ""),
