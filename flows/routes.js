@@ -2,6 +2,7 @@ import LZString from "lz-string";
 import { supabase } from "../lib/supabase-client.js";
 import { runFlow } from "./executor.js";
 import cors from "cors";
+import express from "express";
 
 /* ===========================
    AUTH + RATE LIMIT CACHES
@@ -10,6 +11,9 @@ import cors from "cors";
 const AUTH_CACHE_TTL = 60_000; // 1 min
 const authConfigCache = new Map(); // subdomain -> { ts, requiresAuth, ratelimit }
 const rateLimitBuckets = new Map(); // key:endpoint -> { count, resetAt }
+
+const API_KEY_CACHE_TTL = 60_000; // 1 min
+const apiKeyCache = new Map(); // hash -> { ts, data }
 
 /* ===========================
    AUTH HELPER (cached)
@@ -55,7 +59,6 @@ async function getAuthConfig(subdomain) {
 async function authorizeApiRequest(req, subdomain) {
   const config = await getAuthConfig(subdomain);
 
-  // No keys exist → public endpoint
   if (!config.requiresAuth) {
     return { ok: true, public: true };
   }
@@ -64,15 +67,35 @@ async function authorizeApiRequest(req, subdomain) {
     return { ok: false, status: 401, message: "Request unauthorized: API key required" };
   }
 
-  const { data, error } = await supabase
-    .from("api_auth")
-    .select("id, subdomain, ratelimit_min")
-    .eq("key_hash", req.apiAuth.hash)
-    .eq("revoked", false)
-    .single();
+  const now = Date.now();
+  const cached = apiKeyCache.get(req.apiAuth.hash);
+  console.log("API KEY CACHE:", Array.from(apiKeyCache.entries()));
+  for (const [key, value] of apiKeyCache) {
+    console.log(value.data);
+  }
 
-  if (error || !data) {
-    return { ok: false, status: 401, message: "Invalid API key" };
+  let data;
+
+  if (cached && now - cached.ts < API_KEY_CACHE_TTL) {
+    data = cached.data;
+  } else {
+    const { data: dbData, error } = await supabase
+      .from("api_auth")
+      .select("id, subdomain, ratelimit_min")
+      .eq("key_hash", req.apiAuth.hash)
+      .eq("revoked", false)
+      .single();
+
+    if (error || !dbData) {
+      return { ok: false, status: 401, message: "Invalid API key" };
+    }
+
+    apiKeyCache.set(req.apiAuth.hash, {
+      ts: now,
+      data: dbData
+    });
+
+    data = dbData;
   }
 
   if (data.subdomain !== subdomain) {
@@ -83,11 +106,12 @@ async function authorizeApiRequest(req, subdomain) {
     };
   }
 
-  supabase.from("api_auth")
-  .update({ last_used_at: new Date().toISOString() })
-  .eq("id", data.id)
-  .then(() => {})
-  .catch(console.error);
+  supabase
+    .from("api_auth")
+    .update({ last_used_at: new Date().toISOString() })
+    .eq("id", data.id)
+    .then(() => {})
+    .catch(console.error);
 
   return { ok: true, key: data };
 }
@@ -151,14 +175,18 @@ export async function registerFlowRoutes(app) {
     methods: ["GET","POST","PUT","DELETE","OPTIONS"],
     allowedHeaders: ["Content-Type"]
   }));
+  app.use(express.json());
+  app.use(express.urlencoded({ extended: true }));
 
   app.get("/api/ping", (req, res) => {
-    res.status(200).json({ success: true });
+    res.status(200).json({ success: true, status: 200, message:"🏓 Pong!" });
   });
+
+  const SYSTEM_ROUTES = new Set(["ping", "create-key"]);
 
   app.all("/api/:endpoint_slug", async (req, res) => {
     const { endpoint_slug } = req.params;
-    if (endpoint_slug === "ping") return;
+    if (SYSTEM_ROUTES.has(endpoint_slug)) return;
 
     try {
       const host = req.headers.host.split(":")[0];
@@ -207,15 +235,47 @@ export async function registerFlowRoutes(app) {
 
       const flow = JSON.parse(decompressed);
 
+      const expectedMethod = flow?.data?.method || "GET";
+
+      if (req.method !== expectedMethod) {
+        return res.status(405).json({
+          success: false,
+          message: `Method ${req.method} not allowed. Expected ${expectedMethod}`
+        });
+      }
+
       const context = {
         variables: {},
         flow: { id: row.id, user_id: row.user_id },
       };
-
+      
+      // Method (new, non-breaking)
+      context.variables["method"] = req.method;
+      
+      // Existing behavior (unchanged)
       flow?.data?.queryParams?.forEach(p => {
         context.variables[p.key] = p.default_value ?? "";
       });
       Object.assign(context.variables, req.query);
+      
+      // Body vars (existing behavior)
+      flow?.data?.bodyVars?.forEach(key => {
+        context.variables[key] = req.body?.[key] ?? null;
+      });
+      
+      // ✅ NEW: Namespaced variables (additive, no breaking changes)
+      
+      // Query (namespaced)
+      flow?.data?.queryParams?.forEach(p => {
+        context.variables[`query.${p.key}`] =
+          req.query[p.key] ?? p.default_value ?? null;
+      });
+      
+      // Body (namespaced)
+      flow?.data?.bodyVars?.forEach(key => {
+        context.variables[`body.${key}`] =
+          req.body?.[key] ?? null;
+      });
 
       await runFlow(flow, req, res, context);
     } catch (err) {
