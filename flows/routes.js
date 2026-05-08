@@ -8,71 +8,27 @@ import express from "express";
    AUTH + RATE LIMIT CACHES
    =========================== */
 
-const AUTH_CACHE_TTL = 60_000; // 1 min
-const authConfigCache = new Map(); // subdomain -> { ts, requiresAuth, ratelimit }
 const rateLimitBuckets = new Map(); // key:endpoint -> { count, resetAt }
 
 const API_KEY_CACHE_TTL = 60_000; // 1 min
 const apiKeyCache = new Map(); // hash -> { ts, data }
 
-/* ===========================
-   AUTH HELPER (cached)
-   =========================== */
-
-async function getAuthConfig(subdomain) {
-  const cached = authConfigCache.get(subdomain);
-  const now = Date.now();
-
-  if (cached && now - cached.ts < AUTH_CACHE_TTL) {
-    return cached;
-  }
-
-  // Get the subdomain's auth setting and default ratelimit from any key
-  const { data: userSettings, error: settingsError } = await supabase
-    .from("user_settings")
-    .select("authentication_enabled")
-    .eq("name", subdomain)
-    .single();
-
-  if (settingsError) throw settingsError;
-
-  // Optional: grab a sample ratelimit from any non-revoked key
-  const { data: keysData, error: keysError } = await supabase
-    .from("api_auth")
-    .select("ratelimit_min")
-    .eq("subdomain", subdomain)
-    .eq("revoked", false)
-    .limit(1);
-
-  if (keysError) throw keysError;
-
-  const config = {
-    ts: now,
-    requiresAuth: userSettings?.authentication_enabled ?? false,
-    ratelimit: keysData[0]?.ratelimit_min ?? 60,
-  };
-
-  authConfigCache.set(subdomain, config);
-  return config;
-}  
-
-async function authorizeApiRequest(req, subdomain) {
-  const config = await getAuthConfig(subdomain);
-
-  if (!config.requiresAuth) {
+async function authorizeApiRequest(req, subdomain, authenticationType) {
+  // Public endpoint
+  if (!authenticationType) {
     return { ok: true, public: true };
   }
 
   if (!req.apiAuth) {
-    return { ok: false, status: 401, message: "Request unauthorized: API key required" };
+    return {
+      ok: false,
+      status: 401,
+      message: "Request unauthorized: API key required",
+    };
   }
 
   const now = Date.now();
   const cached = apiKeyCache.get(req.apiAuth.hash);
-  console.log("API KEY CACHE:", Array.from(apiKeyCache.entries()));
-  for (const [key, value] of apiKeyCache) {
-    console.log(value.data);
-  }
 
   let data;
 
@@ -81,23 +37,28 @@ async function authorizeApiRequest(req, subdomain) {
   } else {
     const { data: dbData, error } = await supabase
       .from("api_auth")
-      .select("id, subdomain, ratelimit_min")
+      .select("id, subdomain, ratelimit_min, permission")
       .eq("key_hash", req.apiAuth.hash)
       .eq("revoked", false)
       .single();
 
     if (error || !dbData) {
-      return { ok: false, status: 401, message: "Invalid API key" };
+      return {
+        ok: false,
+        status: 401,
+        message: "Invalid API key",
+      };
     }
 
     apiKeyCache.set(req.apiAuth.hash, {
       ts: now,
-      data: dbData
+      data: dbData,
     });
 
     data = dbData;
   }
 
+  // Wrong subdomain
   if (data.subdomain !== subdomain) {
     return {
       ok: false,
@@ -106,14 +67,44 @@ async function authorizeApiRequest(req, subdomain) {
     };
   }
 
+  // Admin-only endpoint
+  if (
+    authenticationType === "admin" &&
+    data.permission !== "admin"
+  ) {
+    return {
+      ok: false,
+      status: 403,
+      message: "Admin API key required",
+    };
+  }
+
+  // User endpoint:
+  // allow both user/admin keys
+  if (
+    authenticationType === "user" &&
+    !["user", "admin"].includes(data.permission)
+  ) {
+    return {
+      ok: false,
+      status: 403,
+      message: "Invalid API key permission",
+    };
+  }
+
   supabase
     .from("api_auth")
-    .update({ last_used_at: new Date().toISOString() })
+    .update({
+      last_used_at: new Date().toISOString()
+    })
     .eq("id", data.id)
     .then(() => {})
     .catch(console.error);
 
-  return { ok: true, key: data };
+  return {
+    ok: true,
+    key: data,
+  };
 }
 
 /* ===========================
@@ -196,8 +187,37 @@ export async function registerFlowRoutes(app) {
         return res.status(400).send("Missing or invalid subdomain");
       }
 
+      /* ===== FLOW LOOKUP ===== */
+      const flows = await getFlowsForSubdomain(subdomain);
+
+      const row = flows.find(
+        f => f.endpoint_slug === endpoint_slug
+      );
+
+      if (!row) {
+        return res.status(404).send("Endpoint not found");
+      }
+
+      const decompressed = LZString.decompressFromBase64(
+        row.published_tree || row.saved_tree
+      );
+
+      if (!decompressed) {
+        throw new Error("Decompression failed");
+      }
+
+      const flow = JSON.parse(decompressed);
+
+      const authenticationType =
+        flow?.data?.authenticationType ?? null;
+
       /* ===== AUTH ===== */
-      const auth = await authorizeApiRequest(req, subdomain);
+      const auth = await authorizeApiRequest(
+        req,
+        subdomain,
+        authenticationType
+      );
+
       if (!auth.ok) {
         return res.status(auth.status).json({
           success: false,
@@ -224,18 +244,9 @@ export async function registerFlowRoutes(app) {
       }
 
       /* ===== FLOW EXECUTION ===== */
-      const flows = await getFlowsForSubdomain(subdomain);
-      const row = flows.find(f => f.endpoint_slug === endpoint_slug);
-      if (!row) return res.status(404).send("Endpoint not found");
 
-      const decompressed = LZString.decompressFromBase64(
-        row.published_tree || row.saved_tree
-      );
-      if (!decompressed) throw new Error("Decompression failed");
-
-      const flow = JSON.parse(decompressed);
-
-      const expectedMethod = flow?.data?.method || "GET";
+      const expectedMethod =
+        flow?.data?.method || "GET";
 
       if (req.method !== expectedMethod) {
         return res.status(405).json({
