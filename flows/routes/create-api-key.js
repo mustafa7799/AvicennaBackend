@@ -142,4 +142,104 @@ export function registerAdminApiKeyRoutes(app) {
       });
     }
   });
+
+  app.delete("/admin/api-keys/:id", async (req, res) => {
+    try {
+      const host = req.headers.host.split(":")[0];
+      const subdomain = host.split(".")[0];
+  
+      if (!subdomain || subdomain === "www") {
+        return res.status(400).json({
+          success: false,
+          message: "Missing or invalid subdomain",
+        });
+      }
+  
+      /* ===========================
+         AUTH (ADMIN REQUIRED)
+         =========================== */
+  
+      const auth = await authorizeApiRequest(
+        req,
+        subdomain,
+        "admin"
+      );
+  
+      if (!auth.ok) {
+        return res.status(auth.status).json({
+          success: false,
+          message: auth.message,
+        });
+      }
+  
+      const { id } = req.params;
+  
+      if (!id) {
+        return res.status(400).json({
+          success: false,
+          message: "Key ID required",
+        });
+      }
+  
+      /* ===========================
+         VERIFY KEY EXISTS
+         =========================== */
+  
+      const { data: existingKey, error: findError } =
+        await supabase
+          .from("api_auth")
+          .select("id, subdomain")
+          .eq("id", id)
+          .single();
+  
+      if (findError || !existingKey) {
+        return res.status(404).json({
+          success: false,
+          message: "API key not found",
+        });
+      }
+  
+      /* ===========================
+         SUBDOMAIN CHECK
+         =========================== */
+  
+      if (existingKey.subdomain !== subdomain) {
+        return res.status(403).json({
+          success: false,
+          message: "Cannot delete API key from another subdomain",
+        });
+      }
+  
+      /* ===========================
+         HARD DELETE
+         =========================== */
+  
+      const { error: deleteError } = await supabase
+        .from("api_auth")
+        .delete()
+        .eq("id", id);
+  
+      if (deleteError) {
+        console.error(deleteError);
+  
+        return res.status(500).json({
+          success: false,
+          message: deleteError.message,
+        });
+      }
+  
+      return res.status(200).json({
+        success: true,
+        message: "API key deleted",
+      });
+  
+    } catch (err) {
+      console.error(err);
+  
+      return res.status(500).json({
+        success: false,
+        message: "Failed to delete API key",
+      });
+    }
+  });
 }
