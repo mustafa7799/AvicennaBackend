@@ -89,7 +89,6 @@ export function registerAdminApiKeyRoutes(app) {
           id,
           name,
           last_used_at,
-          revoked,
           created_at,
           ratelimit_min,
           permission
