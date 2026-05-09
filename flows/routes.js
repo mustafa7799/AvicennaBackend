@@ -40,7 +40,6 @@ export async function authorizeApiRequest(req, subdomain, authenticationType) {
       .from("api_auth")
       .select("id, owner_id, subdomain, ratelimit_min, permission")
       .eq("key_hash", req.apiAuth.hash)
-      .eq("revoked", false)
       .single();
 
     if (error || !dbData) {

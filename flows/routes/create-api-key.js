@@ -55,10 +55,17 @@ export function registerAdminApiKeyRoutes(app) {
          =========================== */
 
       const {
-        name = "Admin API Key",
+        name = "My API Key",
         ratelimit_min = 60,
-        permission = "admin",
+        permission = "user",
       } = req.body || {};
+
+      if (!["admin", "user"].includes(permission)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid permission",
+        });
+      }
 
       const { raw, hash } = generateApiKey();
 
@@ -71,6 +78,12 @@ export function registerAdminApiKeyRoutes(app) {
           key_hash: hash,
           ratelimit_min,
           permission,
+          metadata: {
+            "created_by":{
+               "platform":"admin_route",
+               "api_key_id": auth.key.id || undefined
+            }
+         }
         })
         .select(`
           id,
@@ -94,8 +107,9 @@ export function registerAdminApiKeyRoutes(app) {
 
       return res.status(201).json({
         success: true,
-        key: data,
-        plaintext: raw,
+        status: 200,
+        key: raw,
+        key_data: data,
       });
 
     } catch (err) {
