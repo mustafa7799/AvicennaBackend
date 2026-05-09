@@ -54,11 +54,34 @@ export function registerAdminApiKeyRoutes(app) {
          BODY
          =========================== */
 
-      const {
-        name = "Untitled API Key",
-        ratelimit_min = 60,
-        permission = "user",
-      } = req.body || {};
+        const {
+          name,
+          ratelimit_min = 60,
+          permission = "user",
+        } = req.body || {};
+        
+        if (!name || typeof name !== "string") {
+          return res.status(400).json({
+            success: false,
+            message: "Name is required",
+          });
+        }
+        
+        const cleanName = name.trim();
+        
+        if (cleanName.length < 3) {
+          return res.status(400).json({
+            success: false,
+            message: "Name must be at least 3 characters",
+          });
+        }
+        
+        if (cleanName.length > 50) {
+          return res.status(400).json({
+            success: false,
+            message: "Name must be less than 50 characters",
+          });
+        }
 
       if (!["admin", "user"].includes(permission)) {
         return res.status(400).json({
