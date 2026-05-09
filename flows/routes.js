@@ -3,6 +3,7 @@ import { supabase } from "../lib/supabase-client.js";
 import { runFlow } from "./executor.js";
 import cors from "cors";
 import express from "express";
+import { registerAdminApiKeyRoutes } from "./routes/create-api-key.js";
 
 /* ===========================
    AUTH + RATE LIMIT CACHES
@@ -13,7 +14,7 @@ const rateLimitBuckets = new Map(); // key:endpoint -> { count, resetAt }
 const API_KEY_CACHE_TTL = 60_000; // 1 min
 const apiKeyCache = new Map(); // hash -> { ts, data }
 
-async function authorizeApiRequest(req, subdomain, authenticationType) {
+export async function authorizeApiRequest(req, subdomain, authenticationType) {
   // Public endpoint
   if (!authenticationType) {
     return { ok: true, public: true };
@@ -37,7 +38,7 @@ async function authorizeApiRequest(req, subdomain, authenticationType) {
   } else {
     const { data: dbData, error } = await supabase
       .from("api_auth")
-      .select("id, subdomain, ratelimit_min, permission")
+      .select("id, owner_id, subdomain, ratelimit_min, permission")
       .eq("key_hash", req.apiAuth.hash)
       .eq("revoked", false)
       .single();
@@ -173,7 +174,12 @@ export async function registerFlowRoutes(app) {
     res.status(200).json({ success: true, status: 200, message:"🏓 Pong!" });
   });
 
-  const SYSTEM_ROUTES = new Set(["ping", "create-key"]);
+  const SYSTEM_ROUTES = new Set([
+    "ping",
+    "create-key",
+    "admin"
+  ]);
+  registerAdminApiKeyRoutes(app);
 
   app.all("/api/:endpoint_slug", async (req, res) => {
     const { endpoint_slug } = req.params;
