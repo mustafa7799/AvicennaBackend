@@ -106,7 +106,6 @@ export function registerAdminApiKeyRoutes(app) {
 
       return res.status(201).json({
         success: true,
-        status: 200,
         key: raw,
         key_data: data,
       });
