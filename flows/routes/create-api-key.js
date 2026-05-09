@@ -55,7 +55,7 @@ export function registerAdminApiKeyRoutes(app) {
          =========================== */
 
       const {
-        name = "My API Key",
+        name = "Untitled API Key",
         ratelimit_min = 60,
         permission = "user",
       } = req.body || {};
